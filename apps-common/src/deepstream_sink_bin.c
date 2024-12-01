@@ -51,7 +51,7 @@ create_render_bin (NvDsSinkRenderConfig * config, NvDsSinkBinSubBin * bin)
     goto done;
   }
 
-  g_snprintf (elem_name, sizeof (elem_name), "sink_sub_bin_sink%d", uid);
+  g_snprintf (elem_name, sizeof (elem_name), "sink_sub_bin_ren_sink%d", uid);
   switch (config->type) {
 #ifndef IS_TEGRA
     case NV_DS_SINK_RENDER_EGL:
@@ -253,7 +253,7 @@ create_msg_conv_broker_bin (NvDsSinkMsgConvBrokerConfig * config,
         "dummy-payload", config->conv_dummy_payload, NULL);
 
   /* Create msg broker to send payload to server */
-  g_snprintf (elem_name, sizeof (elem_name), "sink_sub_bin_sink%d", uid);
+  g_snprintf (elem_name, sizeof (elem_name), "sink_sub_bin_broker_sink%d", uid);
   bin->sink = gst_element_factory_make (NVDS_ELEM_MSG_BROKER, elem_name);
   if (!bin->sink) {
     NVGSTDS_ERR_MSG_V ("Failed to create '%s'", elem_name);
@@ -485,7 +485,7 @@ create_encode_file_bin (NvDsSinkEncoderConfig * config, NvDsSinkBinSubBin * bin)
     goto done;
   }
 
-  g_snprintf (elem_name, sizeof (elem_name), "sink_sub_bin_sink%d", uid);
+  g_snprintf (elem_name, sizeof (elem_name), "sink_sub_bin_file_sink%d", uid);
   bin->sink = gst_element_factory_make (NVDS_ELEM_SINK_FILE, elem_name);
   if (!bin->sink) {
     NVGSTDS_ERR_MSG_V ("Failed to create '%s'", elem_name);

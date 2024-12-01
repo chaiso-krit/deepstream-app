@@ -14,6 +14,12 @@
 #include "deepstream_config_file_parser.h"
 #include <cuda_runtime_api.h>
 #include "nvds_version.h"
+#include "nvdsmeta_schema.h"
+
+#include <iostream>
+#include <sstream>
+#include "nvds_analytics_meta.h"
+
 #include <string.h>
 #include <unistd.h>
 #include <termios.h>
@@ -25,6 +31,15 @@
 
 #define DEFAULT_X_WINDOW_WIDTH 1920
 #define DEFAULT_X_WINDOW_HEIGHT 1080
+
+#define MAX_TIME_STAMP_LEN (64)
+#define MAX_COUNT_LEN (16)
+
+#ifdef EN_DEBUG
+#define LOGD(...) printf(__VA_ARGS__)
+#else
+#define LOGD(...)
+#endif
 
 AppCtx *appCtx[MAX_INSTANCES];
 static guint cintr = FALSE;
@@ -51,7 +66,6 @@ static GMutex disp_lock;
 static guint rrow, rcol, rcfg;
 static gboolean rrowsel = FALSE, selecting = FALSE;
 
-
 GST_DEBUG_CATEGORY (NVDS_APP);
 
 GOptionEntry entries[] = {
@@ -74,6 +88,95 @@ GOptionEntry entries[] = {
   ,
 };
 
+typedef enum NvDsAnalyticType {
+   NVDS_ANALYTIC_OBJ_IN_ROI,
+   NVDS_ANALYTIC_LINE_CROSSING_CUMULATIVE,
+   NVDS_ANALYTIC_LINE_CROSSING_CURRENT_FRAME,
+   NVDS_ANALYTIC_OVERCROWDING_STATUS,
+ } NvDsAnalyticType;
+
+typedef struct NvDsAnalyticObject {
+   NvDsAnalyticType type;      
+   gchar *name;      
+   gchar *value;     
+ } NvDsAnalyticObject;
+
+static void
+generate_analytic_object_meta (gpointer data, NvDsAnalyticType analytic_type, std::string name, guint value)
+{
+  NvDsAnalyticObject *obj = (NvDsAnalyticObject *) data;
+
+  obj->type = analytic_type;
+  obj->name = NULL;
+  obj->value = NULL;
+
+  switch (analytic_type)
+  {
+  case NVDS_ANALYTIC_OBJ_IN_ROI:
+  case NVDS_ANALYTIC_LINE_CROSSING_CUMULATIVE:
+  case NVDS_ANALYTIC_LINE_CROSSING_CURRENT_FRAME:
+    obj->name = g_strdup (name.c_str());
+    obj->value = g_strdup_printf("%d", value);
+    break;
+
+  case NVDS_ANALYTIC_OVERCROWDING_STATUS:
+    obj->name = g_strdup (name.c_str());
+    if (value) {
+      obj->value = g_strdup ("false");
+    } else {
+      obj->value = g_strdup ("true");
+    }
+    break;
+
+  default:
+    g_print ("invalid analytic type\n");
+    break;
+  }
+}
+
+static void
+generate_product_object_meta (gpointer data, NvDsAnalyticType analytic_type, std::string name, guint value)
+{
+  NvDsProductObject *obj = (NvDsProductObject *) data;
+
+  obj->type = NULL;
+  obj->brand = NULL;
+  obj->shape = NULL;
+
+  switch (analytic_type)
+  {
+  case NVDS_ANALYTIC_OBJ_IN_ROI:
+    obj->type = g_strdup ("object_in_roi");
+    obj->brand = g_strdup (name.c_str());
+    obj->shape = g_strdup_printf("%d", value);
+    break;
+  case NVDS_ANALYTIC_LINE_CROSSING_CUMULATIVE:
+    obj->type = g_strdup ("line_crossing_cumulative");
+    obj->brand = g_strdup (name.c_str());
+    obj->shape = g_strdup_printf("%d", value);
+    break;
+  case NVDS_ANALYTIC_LINE_CROSSING_CURRENT_FRAME:
+    obj->type = g_strdup ("line_crossing_current_frame");
+    obj->brand = g_strdup (name.c_str());
+    obj->shape = g_strdup_printf("%d", value);
+    break;
+
+  case NVDS_ANALYTIC_OVERCROWDING_STATUS:
+    obj->type = g_strdup ("overcrowding_status");
+    obj->brand = g_strdup (name.c_str());
+    if (value) {
+      obj->shape = g_strdup ("false");
+    } else {
+      obj->shape = g_strdup ("true");
+    }
+    break;
+
+  default:
+    g_print ("invalid analytic type\n");
+    break;
+  }
+}
+
 /**
  * Callback function to be called once all inferences (Primary + Secondary)
  * are done. This is opportunity to modify content of the metadata.
@@ -89,11 +192,13 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
   guint num_female = 0;
   guint num_objects[128];
 
+  int count = 0;
+
   memset (num_objects, 0, sizeof (num_objects));
 
   for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
       l_frame = l_frame->next) {
-    NvDsFrameMeta *frame_meta = l_frame->data;
+    NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) l_frame->data;
     for (NvDsMetaList * l_obj = frame_meta->obj_meta_list; l_obj != NULL;
         l_obj = l_obj->next) {
       NvDsObjectMeta *obj = (NvDsObjectMeta *) l_obj->data;
@@ -115,7 +220,390 @@ all_bbox_generated (AppCtx * appCtx, GstBuffer * buf,
           }
         }
       }
+      count++;
     }
+  }
+}
+
+static void
+generate_ts_rfc3339 (char *buf, int buf_size)
+{
+  time_t tloc;
+  struct tm tm_log;
+  struct timespec ts;
+  char strmsec[6];              //.nnnZ\0
+
+  clock_gettime (CLOCK_REALTIME, &ts);
+  memcpy (&tloc, (void *) (&ts.tv_sec), sizeof (time_t));
+  gmtime_r (&tloc, &tm_log);
+  strftime (buf, buf_size, "%Y-%m-%dT%H:%M:%S", &tm_log);
+  int ms = ts.tv_nsec / 1000000;
+  g_snprintf (strmsec, sizeof (strmsec), ".%.3dZ", ms);
+  strncat (buf, strmsec, buf_size);
+}
+
+static gpointer
+meta_copy_func (gpointer data, gpointer user_data)
+{
+  NvDsUserMeta *user_meta = (NvDsUserMeta *) data;
+  NvDsEventMsgMeta *srcMeta = (NvDsEventMsgMeta *) user_meta->user_meta_data;
+  NvDsEventMsgMeta *dstMeta = NULL;
+
+  dstMeta = (NvDsEventMsgMeta *) g_memdup2 (srcMeta, sizeof (NvDsEventMsgMeta));
+
+  if (srcMeta->ts)
+    dstMeta->ts = g_strdup (srcMeta->ts);
+
+  if (srcMeta->objSignature.size > 0) {
+    dstMeta->objSignature.signature = (gdouble *) g_memdup2 (srcMeta->objSignature.signature,
+        srcMeta->objSignature.size);
+    dstMeta->objSignature.size = srcMeta->objSignature.size;
+  }
+
+  if (srcMeta->objectId) {
+    dstMeta->objectId = g_strdup (srcMeta->objectId);
+  }
+
+  if (srcMeta->sensorStr) {
+    dstMeta->sensorStr = g_strdup (srcMeta->sensorStr);
+  }
+
+  if (srcMeta->extMsgSize > 0) {
+    if (srcMeta->objType == NVDS_OBJECT_TYPE_VEHICLE) {
+      NvDsVehicleObject *srcObj = (NvDsVehicleObject *) srcMeta->extMsg;
+      NvDsVehicleObject *obj =
+          (NvDsVehicleObject *) g_malloc0 (sizeof (NvDsVehicleObject));
+      if (srcObj->type)
+        obj->type = g_strdup (srcObj->type);
+      if (srcObj->make)
+        obj->make = g_strdup (srcObj->make);
+      if (srcObj->model)
+        obj->model = g_strdup (srcObj->model);
+      if (srcObj->color)
+        obj->color = g_strdup (srcObj->color);
+      if (srcObj->license)
+        obj->license = g_strdup (srcObj->license);
+      if (srcObj->region)
+        obj->region = g_strdup (srcObj->region);
+
+      dstMeta->extMsg = obj;
+      dstMeta->extMsgSize = sizeof (NvDsVehicleObject);
+    } else if (srcMeta->objType == NVDS_OBJECT_TYPE_PERSON) {
+      NvDsPersonObject *srcObj = (NvDsPersonObject *) srcMeta->extMsg;
+      NvDsPersonObject *obj =
+          (NvDsPersonObject *) g_malloc0 (sizeof (NvDsPersonObject));
+
+      obj->age = srcObj->age;
+
+      if (srcObj->gender)
+        obj->gender = g_strdup (srcObj->gender);
+      if (srcObj->cap)
+        obj->cap = g_strdup (srcObj->cap);
+      if (srcObj->hair)
+        obj->hair = g_strdup (srcObj->hair);
+      if (srcObj->apparel)
+        obj->apparel = g_strdup (srcObj->apparel);
+
+      dstMeta->extMsg = obj;
+      dstMeta->extMsgSize = sizeof (NvDsPersonObject);
+    } else if (srcMeta->objType == NVDS_OBJECT_TYPE_CUSTOM) {
+      NvDsAnalyticObject *srcObj = (NvDsAnalyticObject *) srcMeta->extMsg;
+      NvDsAnalyticObject *obj =
+          (NvDsAnalyticObject *) g_malloc0 (sizeof (NvDsAnalyticObject));
+
+      obj->type = srcObj->type;
+
+      if (srcObj->name)
+        obj->name = g_strdup (srcObj->name);
+      if (srcObj->value)
+        obj->value = g_strdup (srcObj->value);
+
+      dstMeta->extMsg = obj;
+      dstMeta->extMsgSize = sizeof (NvDsAnalyticObject);
+    } else if (srcMeta->objType == NVDS_OBJECT_TYPE_PRODUCT) {
+      NvDsProductObject *srcObj = (NvDsProductObject *) srcMeta->extMsg;
+      NvDsProductObject *obj =
+          (NvDsProductObject *) g_malloc0 (sizeof (NvDsProductObject));
+
+      if (srcObj->type)
+        obj->type = g_strdup (srcObj->type);
+      if (srcObj->brand)
+        obj->brand = g_strdup (srcObj->brand);
+      if (srcObj->shape)
+        obj->shape = g_strdup (srcObj->shape);
+
+      dstMeta->extMsg = obj;
+      dstMeta->extMsgSize = sizeof (NvDsProductObject);
+    }
+  }
+
+  return dstMeta;
+}
+
+static void
+meta_free_func (gpointer data, gpointer user_data)
+{
+  NvDsUserMeta *user_meta = (NvDsUserMeta *) data;
+  NvDsEventMsgMeta *srcMeta = (NvDsEventMsgMeta *) user_meta->user_meta_data;
+  user_meta->user_meta_data = NULL;
+
+  if (srcMeta->ts) {
+    g_free (srcMeta->ts);
+  }
+
+  if (srcMeta->objSignature.size > 0) {
+    g_free (srcMeta->objSignature.signature);
+    srcMeta->objSignature.size = 0;
+  }
+
+  if (srcMeta->objectId) {
+    g_free (srcMeta->objectId);
+  }
+
+  if (srcMeta->sensorStr) {
+    g_free (srcMeta->sensorStr);
+  }
+
+  if (srcMeta->extMsgSize > 0) {
+    if (srcMeta->objType == NVDS_OBJECT_TYPE_VEHICLE) {
+      NvDsVehicleObject *obj = (NvDsVehicleObject *) srcMeta->extMsg;
+      if (obj->type)
+        g_free (obj->type);
+      if (obj->color)
+        g_free (obj->color);
+      if (obj->make)
+        g_free (obj->make);
+      if (obj->model)
+        g_free (obj->model);
+      if (obj->license)
+        g_free (obj->license);
+      if (obj->region)
+        g_free (obj->region);
+    } else if (srcMeta->objType == NVDS_OBJECT_TYPE_PERSON) {
+      NvDsPersonObject *obj = (NvDsPersonObject *) srcMeta->extMsg;
+
+      if (obj->gender)
+        g_free (obj->gender);
+      if (obj->cap)
+        g_free (obj->cap);
+      if (obj->hair)
+        g_free (obj->hair);
+      if (obj->apparel)
+        g_free (obj->apparel);
+    } else if (srcMeta->objType == NVDS_OBJECT_TYPE_CUSTOM) {
+      NvDsAnalyticObject *obj = (NvDsAnalyticObject *) srcMeta->extMsg;
+
+      if (obj->name)
+        g_free (obj->name);
+      if (obj->value)
+        g_free (obj->value);
+    } else if (srcMeta->objType == NVDS_OBJECT_TYPE_PRODUCT) {
+      NvDsProductObject *obj = (NvDsProductObject *) srcMeta->extMsg;
+
+      if (obj->type)
+        g_free (obj->type);
+      if (obj->brand)
+        g_free (obj->brand);
+      if (obj->shape)
+        g_free (obj->shape);
+    }
+    g_free (srcMeta->extMsg);
+    srcMeta->extMsg = NULL;
+    srcMeta->extMsgSize = 0;
+  }
+  g_free (srcMeta);
+}
+
+static gpointer
+meta_copy_func_custom (gpointer data, gpointer user_data)
+{
+  NvDsUserMeta *user_meta = (NvDsUserMeta *) data;
+  NvDsCustomMsgInfo *srcMeta = (NvDsCustomMsgInfo *) user_meta->user_meta_data;
+  NvDsCustomMsgInfo *dstMeta = NULL;
+
+  dstMeta = (NvDsCustomMsgInfo *) g_memdup2 (srcMeta, sizeof (NvDsCustomMsgInfo));
+
+  if (srcMeta->message)
+    dstMeta->message = (gpointer) g_strdup ((const char*)srcMeta->message);
+  dstMeta->size = srcMeta->size;
+
+  return dstMeta;
+}
+
+static void
+meta_free_func_custom (gpointer data, gpointer user_data)
+{
+  NvDsUserMeta *user_meta = (NvDsUserMeta *) data;
+  NvDsCustomMsgInfo *srcMeta = (NvDsCustomMsgInfo *) user_meta->user_meta_data;
+
+  if (srcMeta->message)
+    g_free (srcMeta->message);
+  srcMeta->size = 0;
+
+  g_free (user_meta->user_meta_data);
+}
+
+static void
+generate_event_msg_meta (AppCtx * appCtx, gpointer data, gboolean useTs,
+    GstClockTime ts, gchar * src_uri, gint stream_id, guint sensor_id,
+    NvDsProductObject * analytic_obj, NvDsFrameMeta * frame_meta)
+{
+  NvDsEventMsgMeta *meta = (NvDsEventMsgMeta *) data;
+
+  //meta->type = NVDS_EVENT_CUSTOM;
+  meta->type = NVDS_EVENT_MOVING;
+  //meta->objType = NVDS_OBJECT_TYPE_CUSTOM; 
+  meta->objType = NVDS_OBJECT_TYPE_PRODUCT;
+  meta->sensorId = sensor_id;
+  meta->placeId = sensor_id;
+  meta->moduleId = sensor_id;
+  meta->frameId = frame_meta->frame_num;
+  meta->ts = (gchar *) g_malloc0 (MAX_TIME_STAMP_LEN + 1);
+
+  /** INFO: This API is called once for every 30 frames (now) */
+  if ((useTs && src_uri) || appCtx->config.source_attr_all_config.type == NV_DS_SOURCE_IPC) {
+    g_snprintf (meta->ts, sizeof (meta->ts), ".%ld", ts);
+  } else {
+    generate_ts_rfc3339 (meta->ts, MAX_TIME_STAMP_LEN);
+  }
+
+  meta->extMsg = analytic_obj;
+  meta->extMsgSize = sizeof (NvDsProductObject);
+}
+
+static void
+add_event_msg_meta (AppCtx * appCtx, gboolean useTs, GstClockTime ts,
+    gint stream_id, NvDsProductObject * analytic_obj, NvDsFrameMeta * frame_meta, NvDsBatchMeta * batch_meta)
+{
+  NvDsEventMsgMeta *msg_meta =
+      (NvDsEventMsgMeta *)g_malloc0(sizeof(NvDsEventMsgMeta));
+  generate_event_msg_meta(appCtx, msg_meta, useTs, ts,
+                          appCtx->config.multi_source_config[stream_id].uri, stream_id,
+                          appCtx->config.multi_source_config[stream_id].camera_id,
+                          analytic_obj, frame_meta);
+
+  NvDsUserMeta *user_event_meta =
+      nvds_acquire_user_meta_from_pool(batch_meta);
+  if (!user_event_meta) {
+    g_print("Error in attaching event meta to buffer\n");
+    return;
+  }
+
+  user_event_meta->user_meta_data = (void *)msg_meta;
+  user_event_meta->base_meta.batch_meta = batch_meta;
+  user_event_meta->base_meta.meta_type = NVDS_EVENT_MSG_META;
+  user_event_meta->base_meta.copy_func =
+      (NvDsMetaCopyFunc)meta_copy_func;
+  user_event_meta->base_meta.release_func =
+      (NvDsMetaReleaseFunc)meta_free_func;
+  nvds_add_user_meta_to_frame(frame_meta, user_event_meta);
+}
+
+static void
+add_custom_msg_meta(AppCtx *appCtx, gint stream_id,
+    NvDsProductObject *obj, NvDsFrameMeta *frame_meta, NvDsBatchMeta *batch_meta)
+{
+  NvDsCustomMsgInfo *msg_meta =
+      (NvDsCustomMsgInfo *)g_malloc0(sizeof(NvDsCustomMsgInfo));
+
+  gchar *message_data;
+  message_data = g_strdup_printf("%d|%s|%s|%s", stream_id, obj->type, obj->brand, obj->shape);
+  msg_meta->size = strlen(message_data);
+  msg_meta->message = g_strdup(message_data);
+
+  NvDsUserMeta *user_event_meta =
+      nvds_acquire_user_meta_from_pool(batch_meta);
+  if (user_event_meta) {
+    user_event_meta->user_meta_data = (void *)msg_meta;
+    user_event_meta->base_meta.batch_meta = batch_meta;
+    user_event_meta->base_meta.meta_type = NVDS_CUSTOM_MSG_BLOB;
+    user_event_meta->base_meta.copy_func =
+        (NvDsMetaCopyFunc)meta_copy_func_custom;
+    user_event_meta->base_meta.release_func =
+        (NvDsMetaReleaseFunc)meta_free_func_custom;
+    nvds_add_user_meta_to_frame(frame_meta, user_event_meta);
+  } else {
+    g_print("Error in attaching event meta to buffer\n");
+  }
+
+  if (obj->type)
+    g_free(obj->type);
+  if (obj->brand)
+    g_free(obj->brand);
+  if (obj->shape)
+    g_free(obj->shape);
+  g_free(obj);
+}
+
+/**
+ * Callback function to be called once all inferences (Primary + Secondary)
+ * are done. This is opportunity to modify content of the metadata.
+ * e.g. Here Person is being replaced with Man/Woman and corresponding counts
+ * are being maintained. It should be modified according to network classes
+ * or can be removed altogether if not required.
+ */
+static void
+bbox_generated_probe_after_analytics (AppCtx * appCtx, GstBuffer * buf,
+    NvDsBatchMeta * batch_meta, guint index)
+{
+  NvDsUserMeta *usr_meta = NULL;
+  NvDsAnalyticsFrameMeta *analytic_meta = NULL;
+  GstClockTime buffer_pts = 0;
+  guint32 stream_id = 0;
+
+  for (NvDsMetaList * l_frame = batch_meta->frame_meta_list; l_frame != NULL;
+      l_frame = l_frame->next) {
+    NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) l_frame->data;
+    stream_id = frame_meta->source_id;
+
+    GList *l;
+    for (l = frame_meta->frame_user_meta_list; l != NULL; l = l->next) {
+      usr_meta = (NvDsUserMeta *) (l->data);
+
+      if (usr_meta->base_meta.meta_type != NVDS_USER_FRAME_META_NVDSANALYTICS)
+        continue;
+
+      analytic_meta = (NvDsAnalyticsFrameMeta *) usr_meta->user_meta_data;
+
+      for (std::pair<std::string, uint32_t> status : analytic_meta->objInROIcnt) {
+        LOGD("key : %s , value : %d\n", status.first.c_str(), status.second);
+        NvDsProductObject *obj =
+            (NvDsProductObject *) g_malloc0 (sizeof (NvDsProductObject));
+        generate_product_object_meta(obj, NVDS_ANALYTIC_OBJ_IN_ROI, status.first, status.second);
+
+        add_custom_msg_meta(appCtx, stream_id, obj, frame_meta, batch_meta);
+        //add_event_msg_meta(appCtx, False, buffer_pts, stream_id, obj, frame_meta, batch_meta);
+      } 
+
+      for (std::pair<std::string, uint32_t> status : analytic_meta->objLCCumCnt) {
+        LOGD("key : %s , value : %d\n", status.first.c_str(), status.second);
+        NvDsProductObject *obj =
+            (NvDsProductObject *) g_malloc0 (sizeof (NvDsProductObject));
+        generate_product_object_meta(obj, NVDS_ANALYTIC_LINE_CROSSING_CUMULATIVE, status.first, status.second);
+
+        add_custom_msg_meta(appCtx, stream_id, obj, frame_meta, batch_meta);
+        //add_event_msg_meta(appCtx, False, buffer_pts, stream_id, obj, frame_meta, batch_meta);
+      }
+      for (std::pair<std::string, uint32_t> status : analytic_meta->objLCCurrCnt) {
+        LOGD("key : %s , value : %d\n", status.first.c_str(), status.second);
+        NvDsProductObject *obj =
+            (NvDsProductObject *) g_malloc0 (sizeof (NvDsProductObject));
+        generate_product_object_meta(obj, NVDS_ANALYTIC_LINE_CROSSING_CURRENT_FRAME, status.first, status.second);
+
+        add_custom_msg_meta(appCtx, stream_id, obj, frame_meta, batch_meta);
+        //add_event_msg_meta(appCtx, False, buffer_pts, stream_id, obj, frame_meta, batch_meta);
+      } 
+      for (std::pair<std::string, bool> status : analytic_meta->ocStatus) {
+        LOGD("key : %s , value : %d\n", status.first.c_str(), status.second);
+        NvDsProductObject *obj =
+            (NvDsProductObject *) g_malloc0 (sizeof (NvDsProductObject));
+        generate_product_object_meta(obj, NVDS_ANALYTIC_OVERCROWDING_STATUS, status.first, status.second);
+
+        add_custom_msg_meta(appCtx, stream_id, obj, frame_meta, batch_meta);
+        //add_event_msg_meta(appCtx, False, buffer_pts, stream_id, obj, frame_meta, batch_meta);
+      }
+    }
+    //testAppCtx->streams[stream_id].frameCount++;
   }
 }
 
@@ -548,8 +1036,7 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
       0, 0, 0, 1.0};
   }
 
-  nvds_add_display_meta_to_frame (nvds_get_nth_frame_meta (batch_meta->
-          frame_meta_list, 0), display_meta);
+  //nvds_add_display_meta_to_frame (nvds_get_nth_frame_meta (batch_meta->frame_meta_list, 0), display_meta);
   return TRUE;
 }
 
@@ -564,7 +1051,7 @@ recreate_pipeline_thread_func (gpointer arg)
   destroy_pipeline (appCtx);
 
   g_print ("Recreate pipeline\n");
-  if (!create_pipeline (appCtx, NULL,
+  if (!create_pipeline (appCtx, bbox_generated_probe_after_analytics,
           all_bbox_generated, perf_cb, overlay_graphics)) {
     NVGSTDS_ERR_MSG_V ("Failed to create pipeline");
     return_value = -1;
@@ -658,7 +1145,7 @@ main (int argc, char *argv[])
   }
 
   for (i = 0; i < num_instances; i++) {
-    appCtx[i] = g_malloc0 (sizeof (AppCtx));
+    appCtx[i] = (AppCtx *)g_malloc0 (sizeof (AppCtx));
     appCtx[i]->person_class_id = -1;
     appCtx[i]->car_class_id = -1;
     appCtx[i]->index = i;
@@ -690,7 +1177,7 @@ main (int argc, char *argv[])
   }
 
   for (i = 0; i < num_instances; i++) {
-    if (!create_pipeline (appCtx[i], NULL,
+    if (!create_pipeline (appCtx[i], bbox_generated_probe_after_analytics,
             all_bbox_generated, perf_cb, overlay_graphics)) {
       NVGSTDS_ERR_MSG_V ("Failed to create pipeline");
       return_value = -1;
