@@ -26,6 +26,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+#include <json-glib/json-glib.h>
+
 #define MAX_INSTANCES 128
 #define APP_TITLE "DeepStream"
 
@@ -56,6 +58,9 @@ static guint num_input_uris;
 static GMutex fps_lock;
 static gdouble fps[MAX_SOURCE_BINS];
 static gdouble fps_avg[MAX_SOURCE_BINS];
+
+static guint count_offset[10] = { 0 };
+static guint count_current[10] = { 0 };
 
 static Display *display = NULL;
 static Window windows[MAX_INSTANCES] = { 0 };
@@ -579,9 +584,12 @@ bbox_generated_probe_after_analytics (AppCtx * appCtx, GstBuffer * buf,
         LOGD("key : %s , value : %d\n", status.first.c_str(), status.second);
         NvDsProductObject *obj =
             (NvDsProductObject *) g_malloc0 (sizeof (NvDsProductObject));
-        generate_product_object_meta(obj, NVDS_ANALYTIC_LINE_CROSSING_CUMULATIVE, status.first, status.second);
+        generate_product_object_meta(obj, NVDS_ANALYTIC_LINE_CROSSING_CUMULATIVE, status.first, status.second - count_offset[stream_id]);
 
         add_custom_msg_meta(appCtx, stream_id, obj, frame_meta, batch_meta);
+
+        // Memory current cumulative
+        count_current[stream_id] = status.second;
         //add_event_msg_meta(appCtx, False, buffer_pts, stream_id, obj, frame_meta, batch_meta);
       }
       for (std::pair<std::string, uint32_t> status : analytic_meta->objLCCurrCnt) {
@@ -1040,6 +1048,58 @@ overlay_graphics (AppCtx * appCtx, GstBuffer * buf,
   return TRUE;
 }
 
+static void
+subscribe_cb (NvMsgBrokerErrorType flag, void *msg, int msg_len, char *topic,
+    void *uData)
+{
+  JsonNode *rootNode = NULL;
+  GError *error = NULL;
+  gboolean ret;
+
+  if (flag == NV_MSGBROKER_API_ERR) {
+    NVGSTDS_ERR_MSG_V ("Error in consuming message.");
+  } else {
+    GST_DEBUG ("Consuming message, on topic[%s]. Payload =%.*s\n\n", topic,
+        msg_len, (char *) msg);
+  }
+
+  JsonParser *parser = json_parser_new ();
+  ret = json_parser_load_from_data (parser, (char *) msg, msg_len, &error);
+  if (!ret) {
+    NVGSTDS_ERR_MSG_V ("Error in parsing json message %s", error->message);
+    g_error_free (error);
+    g_object_unref (parser);
+    return;
+  }
+
+   /**
+   * Following minimum json message is expected to trigger the start / stop
+   * of smart record.
+   * {
+   *   command: string   // "reset"
+   *   stream_id: int     // 0
+   * }
+   */
+
+  rootNode = json_parser_get_root (parser);
+  if (JSON_NODE_HOLDS_OBJECT (rootNode)) {
+    JsonObject *object;
+
+    object = json_node_get_object (rootNode);
+    if (json_object_has_member (object, "command") && json_object_has_member (object, "stream_id")) {
+      const gchar *type = json_object_get_string_member (object, "command");
+      const gint64 stream_id = json_object_get_int_member (object, "stream_id");
+      if (!g_strcmp0 (type, "reset")) {
+          count_offset[stream_id] = count_current[stream_id];
+      }
+    }
+  }
+
+error:
+  g_object_unref (parser);
+  return;
+}
+
 static gboolean
 recreate_pipeline_thread_func (gpointer arg)
 {
@@ -1051,8 +1111,8 @@ recreate_pipeline_thread_func (gpointer arg)
   destroy_pipeline (appCtx);
 
   g_print ("Recreate pipeline\n");
-  if (!create_pipeline (appCtx, bbox_generated_probe_after_analytics,
-          all_bbox_generated, perf_cb, overlay_graphics)) {
+  if (!create_pipeline_with_subscribe (appCtx, bbox_generated_probe_after_analytics,
+          all_bbox_generated, perf_cb, overlay_graphics, subscribe_cb)) {
     NVGSTDS_ERR_MSG_V ("Failed to create pipeline");
     return_value = -1;
     return FALSE;
@@ -1177,8 +1237,8 @@ main (int argc, char *argv[])
   }
 
   for (i = 0; i < num_instances; i++) {
-    if (!create_pipeline (appCtx[i], bbox_generated_probe_after_analytics,
-            all_bbox_generated, perf_cb, overlay_graphics)) {
+    if (!create_pipeline_with_subscribe (appCtx[i], bbox_generated_probe_after_analytics,
+            all_bbox_generated, perf_cb, overlay_graphics, subscribe_cb)) {
       NVGSTDS_ERR_MSG_V ("Failed to create pipeline");
       return_value = -1;
       goto done;

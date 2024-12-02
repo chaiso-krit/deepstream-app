@@ -36,7 +36,7 @@ sink0:
   enable: 1
   #Type - 1=FakeSink 2=EglSink/nv3dsink (Jetson only) 3=File
   type: 2
-  sync: 1
+  sync: 0
   source-id: 0
   gpu-id: 0
   nvbuf-memory-type: 0
@@ -94,7 +94,8 @@ sink3:
   #(1): PAYLOAD_DEEPSTREAM_MINIMAL - Deepstream schema payload minimal
   #(256): PAYLOAD_RESERVED - Reserved type
   #(257): PAYLOAD_CUSTOM   - Custom schema payload
-  msg-conv-payload-type: 2
+  msg-conv-payload-type: 1
+  msg-conv-msg2p-lib: ../../nvmsgconv/libnvds_msgconv_custom.so
   msg-broker-proto-lib: /opt/nvidia/deepstream/deepstream/lib/libnvds_mqtt_proto.so
   #Provide your msg-broker-conn-str here
   msg-broker-conn-str: localhost;1883;

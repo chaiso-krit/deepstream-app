@@ -28,7 +28,7 @@ config-height=1080
 #         2: Display all info from 1 plus information about counts
 osd-mode=2
 #Set OSD font size that has to be displayed
-display-font-size=15
+display-font-size=30
 
 ## Per stream configuration
 [roi-filtering-stream-0]

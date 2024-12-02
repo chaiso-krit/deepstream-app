@@ -41,7 +41,7 @@ SRCFILES:= nvmsgconv.cpp  \
   $(PROTOBUF_BUILD_DIR)/schema.pb.cc \
   $(PROTOBUF_BUILD_DIR)/lidar_schema.pb.cc
 
-TARGET_LIB:= libnvds_msgconv.so
+TARGET_LIB:= libnvds_msgconv_custom.so
 
 all: $(TARGET_LIB)
 

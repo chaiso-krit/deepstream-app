@@ -327,16 +327,17 @@ generate_dsmeta_message(void* privData, void* frameMeta, void* objMeta)
     uuid_unparse_lower(msgId, msgIdStr);
 
     // place object
-    placeObj = generate_place_object(privData, frame_meta);
+    //placeObj = generate_place_object(privData, frame_meta);
 
     // sensor object
-    sensorObj = generate_sensor_object(privData, frame_meta);
+    //sensorObj = generate_sensor_object(privData, frame_meta);
 
     // analytics object
-    analyticsObj = generate_analytics_module_object(privData, frame_meta);
+    //analyticsObj = generate_analytics_module_object(privData, frame_meta);
 
     // object object
-    objectObj = generate_object_object(privData, frame_meta, obj_meta);
+    //objectObj = generate_object_object(privData, frame_meta, obj_meta);
+    
     // event object
     eventObj = generate_event_object(obj_meta);
 
@@ -348,13 +349,13 @@ generate_dsmeta_message(void* privData, void* frameMeta, void* objMeta)
     json_object_set_string_member(rootObj, "messageid", msgIdStr);
     json_object_set_string_member(rootObj, "mdsversion", "1.0");
     json_object_set_string_member(rootObj, "@timestamp", ts);
-    json_object_set_object_member(rootObj, "place", placeObj);
-    json_object_set_object_member(rootObj, "sensor", sensorObj);
-    json_object_set_object_member(rootObj, "analyticsModule", analyticsObj);
-    json_object_set_object_member(rootObj, "object", objectObj);
+    //json_object_set_object_member(rootObj, "place", placeObj);
+    //json_object_set_object_member(rootObj, "sensor", sensorObj);
+    //json_object_set_object_member(rootObj, "analyticsModule", analyticsObj);
+    //json_object_set_object_member(rootObj, "object", objectObj);
     json_object_set_object_member(rootObj, "event", eventObj);
 
-    json_object_set_string_member(rootObj, "videoPath", "");
+    //json_object_set_string_member(rootObj, "videoPath", "");
 
     // Search for any custom message blob within frame usermeta list
     JsonArray* jArray = json_array_new();
@@ -458,7 +459,7 @@ generate_dsmeta_message_minimal(void* privData, void* frameMeta)
             }
             ss << "|" << obj_meta->confidence;
         }
-        json_array_add_string_element(jArray, ss.str().c_str());
+        //json_array_add_string_element(jArray, ss.str().c_str());
     }
 
     // generate timestamp

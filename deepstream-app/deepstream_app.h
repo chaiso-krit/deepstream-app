@@ -211,6 +211,12 @@ gboolean create_pipeline (AppCtx * appCtx,
     perf_callback perf_cb,
     overlay_graphics_callback overlay_graphics_cb);
 
+gboolean create_pipeline_with_subscribe (AppCtx * appCtx,
+    bbox_generated_callback bbox_generated_post_analytics_cb,
+    bbox_generated_callback all_bbox_generated_cb, perf_callback perf_cb,
+    overlay_graphics_callback overlay_graphics_cb, 
+    nv_msgbroker_subscribe_cb_t subscribeCb);
+
 gboolean pause_pipeline (AppCtx * appCtx);
 gboolean resume_pipeline (AppCtx * appCtx);
 gboolean seek_pipeline (AppCtx * appCtx, glong milliseconds, gboolean seek_is_relative);
