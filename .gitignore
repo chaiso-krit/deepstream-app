@@ -34,3 +34,4 @@ nvmsgconv/deepstream_schema/schema.pb.cc
 nvmsgconv/deepstream_schema/schema.pb.h
 nvmsgconv/deepstream_schema/lidar_schema.pb.cc
 nvmsgconv/deepstream_schema/lidar_schema.pb.h
+*.pyc
